@@ -1,15 +1,14 @@
-const express = require('express');
+import { Router } from 'express';
 
-const router = express.Router();
+import { checkAuth } from '../middleware/authMiddleware.js';
+import { grantAccessTo } from '../middleware/roleMiddleware.js';
 
-const { authenticate } = require('../middleware/authMiddleware');
-const { requireRole } = require('../middleware/roleMiddleware');
-
-const {
+import {
   getRiders,
   assignRider
-} = require('../controllers/assignmentController');
+} from '../controllers/assignmentController.js';
 
+const router = Router();
 
 /**
  * GET /api/riders
@@ -17,25 +16,23 @@ const {
  * Dispatcher retrieves available riders.
  */
 router.get(
-  '/riders',
-  authenticate,
-  requireRole(['DISPATCHER']),
+  '/',
+  checkAuth(),
+  grantAccessTo(['DISPATCHER']),
   getRiders
 );
 
-
 /**
- * PATCH /api/deliveries/:id/assign
+ * PATCH /api/riders/deliveries/:id/assign
  *
  * Dispatcher assigns a rider to a delivery.
  */
 router.patch(
   '/deliveries/:id/assign',
-  authenticate,
-  requireRole(['DISPATCHER']),
+  checkAuth(),
+  grantAccessTo(['DISPATCHER']),
   assignRider
 );
 
-
-module.exports = router;
+export default router;
 

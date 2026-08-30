@@ -10,7 +10,7 @@
  * - Move delivery status from PENDING to ASSIGNED
  */
 
-const supabase = require('../config/supabase');
+import { supabaseAdmin } from '../config/supabase.js';
 
 /**
  * GET /api/riders
@@ -20,9 +20,9 @@ const supabase = require('../config/supabase');
  * Authentication and dispatcher authorization are handled
  * by middleware before this controller is reached.
  */
-const getRiders = async (req, res) => {
+export const getRiders = async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data, error } = await supabaseAdmin
       .from('profiles')
       .select('id, role')
       .eq('role', 'RIDER');
@@ -53,7 +53,7 @@ const getRiders = async (req, res) => {
 
 
 /**
- * PATCH /api/deliveries/:id/assign
+ * PATCH /api/riders/deliveries/:id/assign
  *
  * Assign a rider to a delivery.
  *
@@ -61,26 +61,14 @@ const getRiders = async (req, res) => {
  * {
  *   "rider_id": "uuid"
  * }
- *
- * Business rules:
- * 1. Request must come from an authenticated dispatcher.
- * 2. rider_id must be provided.
- * 3. Delivery must exist.
- * 4. Delivery must currently be PENDING.
- * 5. Rider must exist.
- * 6. Selected profile must have role RIDER.
- * 7. Delivery is updated with rider_id.
- * 8. Delivery status becomes ASSIGNED.
  */
-const assignRider = async (req, res) => {
+export const assignRider = async (req, res) => {
   try {
     const deliveryId = req.params.id;
     const { rider_id } = req.body;
-
-    // Defensive authorization check.
-    // Normal authorization should already happen in middleware.
     const user = req.user;
 
+    // Defensive authorization check.
     if (!user) {
       return res.status(401).json({
         error: 'Unauthorized',
@@ -111,11 +99,11 @@ const assignRider = async (req, res) => {
       });
     }
 
-    // 1. Retrieve the delivery.
+    // Retrieve the delivery.
     const {
       data: delivery,
       error: deliveryError
-    } = await supabase
+    } = await supabaseAdmin
       .from('deliveries')
       .select('id, rider_id, status')
       .eq('id', deliveryId)
@@ -137,20 +125,20 @@ const assignRider = async (req, res) => {
       });
     }
 
-    // 2. Only PENDING deliveries can be assigned.
+    // Only PENDING deliveries can be assigned.
     if (delivery.status !== 'PENDING') {
       return res.status(409).json({
         error: 'Conflict',
-        message: `Delivery cannot be assigned because its current status is ${delivery.status}.`
+        message:
+          `Delivery cannot be assigned because its current status is ${delivery.status}.`
       });
     }
 
-    // 3. Verify that the selected profile exists
-    //    and is actually a rider.
+    // Verify that the selected profile exists and is actually a rider.
     const {
       data: rider,
       error: riderError
-    } = await supabase
+    } = await supabaseAdmin
       .from('profiles')
       .select('id, role')
       .eq('id', rider_id)
@@ -179,20 +167,20 @@ const assignRider = async (req, res) => {
       });
     }
 
-    // 4. Assign the rider and update the delivery status.
+    // Assign the rider and move delivery to ASSIGNED.
     const {
       data: updatedDelivery,
       error: updateError
-    } = await supabase
+    } = await supabaseAdmin
       .from('deliveries')
       .update({
-        rider_id: rider_id,
+        rider_id,
         status: 'ASSIGNED'
       })
       .eq('id', deliveryId)
       .eq('status', 'PENDING')
       .select()
-      .maybeSingle();
+      .single();
 
     if (updateError) {
       console.error('Supabase assignment update error:', updateError);
@@ -217,11 +205,3 @@ const assignRider = async (req, res) => {
     });
   }
 };
-
-
-module.exports = {
-  getRiders,
-  assignRider
-};
-
-
