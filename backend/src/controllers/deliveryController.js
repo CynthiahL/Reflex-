@@ -1,124 +1,157 @@
-const { createClient } = require('@supabase/supabase-js');
+import { supabaseAdmin } from '../config/supabase.js';
 
-// Assumes Cynthia has configured this with the SERVICE ROLE key for admin bypass
-const supabase = require('../config/supabase'); 
+// POST /api/deliveries
+export const createDeliveryRequest = async (req, res) => {
+  const {
+    customer_name,
+    customer_phone,
+    delivery_address,
+    item_description,
+    rider_id,
+    payment_confirmed
+  } = req.body;
 
-/**
- * Create a new delivery request.
- * Only accessible to authenticated RETAILERS.
- */
-const createDelivery = async (req, res) => {
+  // Validate required request fields
+  if (
+    !customer_name ||
+    !customer_phone ||
+    !delivery_address ||
+    !item_description
+  ) {
+    return res.status(400).json({
+      error: 'All core customer fields are required.'
+    });
+  }
+
   try {
-    // 1. Obtain authenticated user identity (provided by Cynthia's authMiddleware)
-    const user = req.user;
+    // Generate tracking reference
+    const reference_number = `REF-${Math.floor(100000 + Math.random() * 900000)}`;
 
-    if (!user || user.role !== 'RETAILER') {
-      return res.status(403).json({ 
-        error: 'Forbidden', 
-        message: 'Only retailers can create delivery requests.' 
-      });
-    }
+    // Determine initial delivery state
+    const initialStatus = rider_id ? 'Assigned' : 'Pending';
 
-    // 2. Validate required input
-    const { customer_name, customer_phone, address, item_description } = req.body;
-
-    if (!customer_name || !customer_phone || !address || !item_description) {
-      return res.status(400).json({ 
-        error: 'Bad Request', 
-        message: 'Missing required fields: customer_name, customer_phone, address, item_description' 
-      });
-    }
-
-    // 3. Insert delivery into Supabase
-    // Note: We do NOT pass 'status' or 'rider_id'. The database defaults handle this.
-    const { data, error } = await supabase
+    // Create delivery
+    const { data, error } = await supabaseAdmin
       .from('deliveries')
       .insert({
-        retailer_id: user.id, // Force association with the authenticated retailer
+        reference_number,
+        retailer_id: req.user.id,
+        rider_id: rider_id || null,
         customer_name,
         customer_phone,
-        address,
-        item_description
+        delivery_address,
+        item_description,
+        status: initialStatus,
+        payment_confirmed: Boolean(payment_confirmed),
+        assigned_at: rider_id ? new Date().toISOString() : null
       })
       .select()
       .single();
 
     if (error) {
-      console.error('Supabase delivery creation error:', error);
-      return res.status(500).json({ 
-        error: 'Database Error', 
-        message: 'Failed to create delivery request.' 
+      console.error(' Delivery insert failed:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint
+      });
+
+      return res.status(500).json({
+        error: 'Failed to create delivery',
+        details: error.message
       });
     }
 
-    // 4. Return successful response
-    return res.status(201).json({
-      message: 'Delivery request created successfully',
-      data: data
-    });
+    // Update assigned rider status
+    if (rider_id) {
+      const { error: riderUpdateError } = await supabaseAdmin
+        .from('profiles')
+        .update({ live_status: 'In Transit' })
+        .eq('id', rider_id)
+        .eq('role', 'rider');
 
-  } catch (err) {
-    console.error('Unexpected server error in createDelivery:', err);
-    return res.status(500).json({ 
-      error: 'Internal Server Error', 
-      message: 'An unexpected error occurred.' 
+      if (riderUpdateError) {
+        console.error(' Delivery created but rider status update failed:', riderUpdateError);
+
+        // Do not fail the delivery creation because the secondary status update failed.
+        return res.status(201).json({
+          message: 'Order created and dispatched',
+          delivery: data,
+          warning: 'Rider status could not be updated'
+        });
+      }
+    }
+
+    // Success
+    return res.status(201).json({
+      message: 'Order created and dispatched',
+      delivery: data
+    });
+  } catch (error) {
+    console.error(' Unexpected delivery creation error:', error);
+
+    return res.status(500).json({
+      error: 'Failed to create delivery',
+      details: error.message
     });
   }
 };
 
-/**
- * Retrieve deliveries based on the authenticated user's role.
- */
-const getDeliveries = async (req, res) => {
+// GET /api/deliveries
+export const getDeliveries = async (req, res) => {
   try {
-    const user = req.user;
+    let query = supabaseAdmin.from('deliveries').select('*');
 
-    if (!user) {
-      return res.status(401).json({ error: 'Unauthorized', message: 'Authentication required.' });
+    // Retailer: own deliveries
+    if (req.user.role === 'retailer') {
+      query = query.eq('retailer_id', req.user.id);
     }
 
-    let query = supabase.from('deliveries').select('*');
-
-    // Role-based filtering logic
-    if (user.role === 'RETAILER') {
-      // Retailers only see their own deliveries
-      query = query.eq('retailer_id', user.id);
-    } else if (user.role === 'RIDER') {
-      // Riders only see deliveries assigned to them
-      query = query.eq('rider_id', user.id);
-    } else if (user.role === 'DISPATCHER') {
-      // Dispatchers see all deliveries (can be further filtered by query params if needed)
-      // Ordering by newest first is helpful for dispatchers
-      query = query.order('created_at', { ascending: false });
-    } else {
-      return res.status(403).json({ error: 'Forbidden', message: 'Invalid user role.' });
+    // Rider: assigned deliveries only
+    else if (req.user.role === 'rider') {
+      query = query.eq('rider_id', req.user.id);
     }
 
-    const { data, error } = await query;
+    // Fetch records
+    const { data: records, error } = await query.order('created_at', { ascending: false });
 
     if (error) {
-      console.error('Supabase delivery retrieval error:', error);
-      return res.status(500).json({ 
-        error: 'Database Error', 
-        message: 'Failed to retrieve deliveries.' 
+      console.error(' Delivery retrieval failed:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint
+      });
+
+      return res.status(500).json({
+        error: 'Failed to fetch deliveries record library'
       });
     }
 
-    return res.status(200).json({
-      message: 'Deliveries retrieved successfully',
-      data: data || []
+    // Privacy safeguard
+    const processedDeliveries = records.map(order => {
+      if (
+        req.user.role === 'rider' &&
+        (order.status === 'Delivered' || order.status === 'Cancelled')
+      ) {
+        return {
+          ...order,
+          customer_phone: '07** *** ***',
+          delivery_address: 'Redacted from history'
+        };
+      }
+
+      return order;
     });
 
-  } catch (err) {
-    console.error('Unexpected server error in getDeliveries:', err);
-    return res.status(500).json({ 
-      error: 'Internal Server Error', 
-      message: 'An unexpected error occurred.' 
+    return res.status(200).json({
+      deliveries: processedDeliveries
+    });
+  } catch (error) {
+    console.error(' Unexpected delivery retrieval error:', error);
+
+    return res.status(500).json({
+      error: 'Failed to fetch deliveries record library'
     });
   }
-};
-
-module.exports = {
-  createDelivery,
-  getDeliveries
 };
