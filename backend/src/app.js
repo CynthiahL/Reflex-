@@ -4,8 +4,8 @@ import dotenv from 'dotenv';
 
 // Import route definitions to mount onto the router middleware tree
 import authRoutes from './routes/auth.js';
-import deliveryRoutes from './routes/deliveries.js';
-import riderRoutes from './routes/riders.js';
+// import deliveryRoutes from './routes/deliveries.js';
+// import riderRoutes from './routes/riders.js';
 
 dotenv.config();
 
