@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/authMiddleware');
 const { requireRole } = require('../middleware/roleMiddleware');
 
 // Import controller functions
-const { createDelivery, getDeliveries } = require('../controllers/deliveryController');
+const { createDelivery, getDeliveries, updateDeliveryStatus } = require('../controllers/deliveryController');
 
 /**
  * POST /api/deliveries
@@ -21,9 +21,11 @@ router.post('/', authenticate, requireRole(['RETAILER']), createDelivery);
  * Requires authentication. Filtering is handled dynamically in the controller based on req.user.role.
  */
 router.get('/', authenticate, getDeliveries);
-
-// NOTE FOR MEMBER 5 (Elias) & MEMBER 4 (Ebenezer):
-// Future endpoints like PATCH /api/deliveries/:id/assign or PATCH /api/deliveries/:id/status 
-// should be added below this line in this same file to maintain a clean, unified delivery route.
+/**
+ * PATCH /api/deliveries/:id/status
+ * Rider updates delivery status: ASSIGNED -> PICKED_UP -> DELIVERED.
+ * Requires authentication AND the 'RIDER' role.
+ */
+router.patch('/:id/status', authenticate, requireRole(['RIDER']), updateDeliveryStatus);
 
 module.exports = router;
