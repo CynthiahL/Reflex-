@@ -1,14 +1,10 @@
-
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+
 import { supabase } from '../../lib/supabaseClient';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL;
-
-if (!API_URL) {
-  throw new Error('NEXT_PUBLIC_API_URL is not configured');
-}
+import { useAuth } from '../../app/components/AuthProvider';
 
 interface DeliveryTask {
   id: string;
@@ -20,71 +16,71 @@ interface DeliveryTask {
   status: 'Assigned' | 'Picked Up' | 'Delivered' | 'Cancelled';
 }
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL;
+
 export default function RiderDashboard() {
+  const router = useRouter();
+  const { profile, session, loading: authLoading, signOut } = useAuth();
+
   const [tasks, setTasks] = useState<DeliveryTask[]>([]);
   const [dutyStatus, setDutyStatus] =
     useState<'Available' | 'Offline'>('Offline');
+
   const [loading, setLoading] = useState(true);
   const [actionLoadingId, setActionLoadingId] =
     useState<string | null>(null);
 
-  // Get a valid authenticated session before making API requests
-  const getAuthenticatedSession = async () => {
-    const {
-      data: { session },
-      error
-    } = await supabase.auth.getSession();
+  /*
+   * Explicit role protection.
+   *
+   * Even though the backend protects the API,
+   * the frontend must not render a rider workspace
+   * for a retailer.
+   */
+  useEffect(() => {
+    if (authLoading) return;
 
-    if (error) {
-      throw new Error('Unable to retrieve authentication session.');
+    if (!session || !profile) {
+      router.replace('/');
+      return;
     }
 
-    if (!session?.access_token) {
-      throw new Error('No authenticated session found. Please log in again.');
+    if (profile.role !== 'rider') {
+      router.replace('/dashboard');
     }
+  }, [authLoading, session, profile, router]);
 
-    return session;
-  };
-
-  // Fetch rider workspace
   const fetchRiderWorkspace = useCallback(async () => {
-    try {
-      const session = await getAuthenticatedSession();
+    if (!session || !profile || profile.role !== 'rider' || !API_URL) {
+      return;
+    }
 
-      // Fetch rider's current duty status directly from Supabase
-      const { data: profile, error: profileError } = await supabase
+    try {
+      const { data: currentProfile } = await supabase
         .from('profiles')
         .select('live_status')
-        .eq('id', session.user.id)
+        .eq('id', profile.id)
         .single();
 
-      if (profileError) {
-        throw new Error('Unable to retrieve rider profile.');
-      }
-
       if (
-        profile?.live_status === 'Available' ||
-        profile?.live_status === 'In Transit'
+        currentProfile?.live_status === 'Available' ||
+        currentProfile?.live_status === 'In Transit'
       ) {
         setDutyStatus('Available');
       } else {
         setDutyStatus('Offline');
       }
 
-      // Fetch assigned deliveries through the Express API
       const response = await fetch(`${API_URL}/deliveries`, {
-        method: 'GET',
         headers: {
-          Authorization: `Bearer ${session.access_token}`
-        }
+          Authorization: `Bearer ${session.access_token}`,
+        },
       });
 
       const result = await response.json();
 
       if (!response.ok) {
-        throw new Error(
-          result.error || 'Failed to retrieve assigned deliveries.'
-        );
+        throw new Error(result.error || 'Failed to retrieve deliveries.');
       }
 
       setTasks((result.deliveries || []) as DeliveryTask[]);
@@ -93,67 +89,64 @@ export default function RiderDashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [session, profile]);
 
-  // Initialize dashboard and subscribe to delivery changes
   useEffect(() => {
-    let isMounted = true;
-
-    async function initializeDashboard() {
-      if (isMounted) {
-        await fetchRiderWorkspace();
-      }
+    if (
+      authLoading ||
+      !session ||
+      !profile ||
+      profile.role !== 'rider'
+    ) {
+      return;
     }
 
-    initializeDashboard();
+    fetchRiderWorkspace();
 
     const channel = supabase
-      .channel('rider-task-changes')
+      .channel(`rider-task-changes-${profile.id}`)
       .on(
         'postgres_changes',
         {
           event: '*',
           schema: 'public',
-          table: 'deliveries'
+          table: 'deliveries',
+          filter: `rider_id=eq.${profile.id}`,
         },
         () => {
-          if (isMounted) {
-            fetchRiderWorkspace();
-          }
+          fetchRiderWorkspace();
         }
       )
       .subscribe();
 
     return () => {
-      isMounted = false;
       supabase.removeChannel(channel);
     };
-  }, [fetchRiderWorkspace]);
+  }, [authLoading, session, profile, fetchRiderWorkspace]);
 
-  // Toggle rider duty availability
   const toggleDuty = async () => {
+    if (!session || profile?.role !== 'rider' || !API_URL) return;
+
     const nextStatus =
       dutyStatus === 'Available' ? 'Offline' : 'Available';
 
     try {
-      const session = await getAuthenticatedSession();
-
       const response = await fetch(`${API_URL}/riders/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${session.access_token}`
+          Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
-          new_status: nextStatus
-        })
+          new_status: nextStatus,
+        }),
       });
 
       const result = await response.json();
 
       if (!response.ok) {
         throw new Error(
-          result.error || 'Failed to update rider duty status.'
+          result.error || 'Failed to update duty status.'
         );
       }
 
@@ -161,45 +154,40 @@ export default function RiderDashboard() {
     } catch (err) {
       console.error('Failed to update duty state:', err);
 
-      if (err instanceof Error) {
-        alert(`Failed to modify duty status: ${err.message}`);
-      } else {
-        alert('Failed to modify duty status.');
-      }
+      alert(
+        err instanceof Error
+          ? err.message
+          : 'Failed to update duty status.'
+      );
     }
   };
 
-  // Advance delivery status
   const advanceTaskState = async (
     taskId: string,
-    currentStatus: DeliveryTask['status']
+    currentStatus: string
   ) => {
-    let next_status: 'Picked Up' | 'Delivered';
+    if (!session || profile?.role !== 'rider' || !API_URL) return;
 
-    if (currentStatus === 'Assigned') {
-      next_status = 'Picked Up';
-    } else if (currentStatus === 'Picked Up') {
+    let next_status = 'Picked Up';
+
+    if (currentStatus === 'Picked Up') {
       next_status = 'Delivered';
-    } else {
-      return;
     }
 
     setActionLoadingId(taskId);
 
     try {
-      const session = await getAuthenticatedSession();
-
       const response = await fetch(
         `${API_URL}/deliveries/${taskId}/status`,
         {
           method: 'PATCH',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${session.access_token}`
+            Authorization: `Bearer ${session.access_token}`,
           },
           body: JSON.stringify({
-            next_status
-          })
+            next_status,
+          }),
         }
       );
 
@@ -211,24 +199,37 @@ export default function RiderDashboard() {
         );
       }
 
-      // Refresh dashboard after successful status transition
       await fetchRiderWorkspace();
     } catch (err: unknown) {
-      console.error('Delivery state transition failed:', err);
-
-      if (err instanceof Error) {
-        alert(`❌ State Error: ${err.message}`);
-      } else {
-        alert('❌ An unexpected state transition error occurred.');
-      }
+      alert(
+        err instanceof Error
+          ? `❌ ${err.message}`
+          : '❌ Unexpected state transition error.'
+      );
     } finally {
       setActionLoadingId(null);
     }
   };
 
+  if (authLoading || !session || !profile) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
+        Verifying rider identity...
+      </div>
+    );
+  }
+
+  if (profile.role !== 'rider') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
+        Redirecting to your authorized workspace...
+      </div>
+    );
+  }
+
   if (loading) {
     return (
-      <div className="p-6 text-center text-black font-medium">
+      <div className="min-h-screen flex items-center justify-center bg-gray-900 text-white">
         Loading Rider Workspace...
       </div>
     );
@@ -236,38 +237,78 @@ export default function RiderDashboard() {
 
   return (
     <div className="min-h-screen bg-gray-900 text-white font-sans max-w-md mx-auto shadow-2xl flex flex-col">
-      <header className="bg-gray-800 p-4 border-b border-gray-700 flex justify-between items-center sticky top-0 z-50">
-        <div>
-          <h1 className="text-xl font-black tracking-tight text-blue-400">
-            Reflex Rider
-          </h1>
 
-          <p className="text-xs text-gray-400">
-            Transit Node Command
-          </p>
+      <header className="bg-gray-800 p-4 border-b border-gray-700 sticky top-0 z-50">
+
+        <div className="flex justify-between items-start">
+
+          <div>
+            <h1 className="text-xl font-black tracking-tight text-blue-400">
+              Reflex Rider
+            </h1>
+
+            <p className="text-xs text-gray-400">
+              Transit Node Command
+            </p>
+          </div>
+
+          <button
+            onClick={toggleDuty}
+            className={`px-3 py-1.5 rounded-full text-xs font-bold ${
+              dutyStatus === 'Available'
+                ? 'bg-green-500 text-white'
+                : 'bg-gray-600 text-gray-300'
+            }`}
+          >
+            ● {dutyStatus === 'Available' ? 'On Duty' : 'Off Duty'}
+          </button>
+
         </div>
 
-        <button
-          onClick={toggleDuty}
-          className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all shadow-sm ${
-            dutyStatus === 'Available'
-              ? 'bg-green-500 text-white'
-              : 'bg-gray-600 text-gray-300'
-          }`}
-        >
-          ●{' '}
-          {dutyStatus === 'Available'
-            ? 'On Duty'
-            : 'Off Duty'}
-        </button>
+        {/* Rider account section */}
+        <div className="mt-4 p-3 rounded-lg bg-gray-900 border border-gray-700">
+
+          <div className="flex justify-between items-start">
+
+            <div>
+              <p className="text-xs text-gray-500 uppercase font-semibold">
+                Signed in as
+              </p>
+
+              <p className="text-sm font-bold text-white mt-1">
+                {profile.full_name}
+              </p>
+
+              <p className="text-xs text-gray-400">
+                {profile.email}
+              </p>
+
+              <span className="inline-block mt-2 px-2 py-1 rounded bg-blue-900/60 text-blue-300 text-xs font-bold uppercase">
+                Rider
+              </span>
+            </div>
+
+            <button
+              onClick={signOut}
+              className="text-xs font-semibold text-red-400 hover:text-red-300"
+            >
+              Sign Out
+            </button>
+
+          </div>
+
+        </div>
+
       </header>
 
       <main className="p-4 space-y-4 flex-1 overflow-y-auto">
-        <h2 className="text-sm font-bold tracking-wider text-gray-400 uppercase mb-2">
+
+        <h2 className="text-sm font-bold tracking-wider text-gray-400 uppercase">
           Assigned Deliveries
         </h2>
 
         {tasks.map((task) => {
+
           const isCompleted =
             task.status === 'Delivered' ||
             task.status === 'Cancelled';
@@ -275,13 +316,15 @@ export default function RiderDashboard() {
           return (
             <div
               key={task.id}
-              className={`p-5 rounded-xl border transition-all ${
+              className={`p-5 rounded-xl border ${
                 isCompleted
                   ? 'bg-gray-800/40 border-gray-800 text-gray-500'
                   : 'bg-gray-800 border-gray-700'
               }`}
             >
+
               <div className="flex justify-between items-start mb-3">
+
                 <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-blue-900/60 text-blue-300">
                   {task.reference_number}
                 </span>
@@ -289,9 +332,11 @@ export default function RiderDashboard() {
                 <span className="text-xs font-bold px-2.5 py-0.5 rounded-full bg-blue-900/40 text-blue-400">
                   {task.status}
                 </span>
+
               </div>
 
               <div className="space-y-2 text-sm">
+
                 <p>
                   <strong className="text-gray-400">
                     Recipient:
@@ -303,6 +348,7 @@ export default function RiderDashboard() {
                   <strong className="text-gray-400">
                     Contact:
                   </strong>{' '}
+
                   {isCompleted ? (
                     <span className="italic">
                       {task.customer_phone}
@@ -330,10 +376,12 @@ export default function RiderDashboard() {
                   </strong>{' '}
                   {task.item_description}
                 </p>
+
               </div>
 
               {!isCompleted && (
                 <div className="mt-4 pt-3 border-t border-gray-700/50">
+
                   <button
                     disabled={
                       actionLoadingId === task.id ||
@@ -345,18 +393,20 @@ export default function RiderDashboard() {
                         task.status
                       )
                     }
-                    className="w-full bg-blue-600 disabled:bg-gray-700 text-white disabled:text-gray-400 py-2.5 rounded-lg text-sm font-bold shadow-md transition-all"
+                    className="w-full bg-blue-600 disabled:bg-gray-700 text-white disabled:text-gray-400 py-2.5 rounded-lg text-sm font-bold"
                   >
                     {actionLoadingId === task.id
                       ? 'Updating Network...'
                       : dutyStatus === 'Offline'
-                        ? 'Go On Duty to Proceed'
-                        : task.status === 'Assigned'
-                          ? 'Confirm Package Pickup'
-                          : 'Mark as Delivered'}
+                      ? 'Go On Duty to Proceed'
+                      : task.status === 'Assigned'
+                      ? 'Confirm Package Pickup'
+                      : 'Mark as Delivered'}
                   </button>
+
                 </div>
               )}
+
             </div>
           );
         })}
@@ -368,6 +418,7 @@ export default function RiderDashboard() {
             </p>
           </div>
         )}
+
       </main>
     </div>
   );

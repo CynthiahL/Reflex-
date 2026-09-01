@@ -3,11 +3,17 @@ import { supabaseAdmin } from '../config/supabase.js';
 export const grantAccessTo = (allowedRoles = []) => {
   return async (req, res, next) => {
     try {
+      // Ensure authentication context exists
       if (!req.user || !req.user.id) {
-        return res.status(401).json({ error: 'Authentication context missing.' });
+        return res.status(401).json({ error: 'Authenticated identity is required.' });
       }
 
-      // Query database profile using admin client to securely bypass row level locks
+      // If role already injected by auth middleware, validate directly
+      if (req.user.role && allowedRoles.includes(req.user.role)) {
+        return next();
+      }
+
+      // Otherwise, securely fetch role from Supabase
       const { data: profile, error: dbError } = await supabaseAdmin
         .from('profiles')
         .select('role')
@@ -15,22 +21,27 @@ export const grantAccessTo = (allowedRoles = []) => {
         .single();
 
       if (dbError || !profile) {
-        return res.status(403).json({ error: 'Access denied. Custom profile record not found.' });
-      }
-
-      // Validate user role status against the endpoint configuration list
-      if (!allowedRoles.includes(profile.role)) {
-        return res.status(403).json({ 
-          error: `Forbidden. This operation requires one of these roles: [${allowedRoles.join(', ')}].` 
+        return res.status(403).json({
+          error: 'Access denied. Profile record not found or inaccessible.',
         });
       }
 
-      // Dynamically append verified role to user context payload for controller-level isolation filters
+      // Validate role against allowed list
+      if (!allowedRoles.includes(profile.role)) {
+        return res.status(403).json({
+          error: `Forbidden. This operation requires one of these roles: [${allowedRoles.join(', ')}].`,
+        });
+      }
+
+      // Append verified role to request context for downstream use
       req.user.role = profile.role;
 
       next();
     } catch (error) {
-      return res.status(500).json({ error: 'Internal system error handling role clearance permissions.' });
+      console.error('Role clearance error:', error);
+      return res.status(500).json({
+        error: 'Internal system error while verifying role permissions.',
+      });
     }
   };
 };

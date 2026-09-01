@@ -1,97 +1,43 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 
-import { supabase } from '../../lib/supabaseClient';
-import RetailerDashboard from '../../features/retailer/RetailerDashboard';
-import RiderDashboard from '../../features/rider/RiderDashboard';
-
-type UserRole = 'retailer' | 'rider';
+import { useAuth } from '../components/AuthProvider';
 
 export default function DashboardPage() {
-  const [role, setRole] = useState<UserRole | null>(null);
-  const [checkingSession, setCheckingSession] = useState(true);
+const router = useRouter();
+const { session, profile, loading } = useAuth();
 
-  const router = useRouter();
+useEffect(() => {
+if (loading) return;
 
-  useEffect(() => {
-    let isMounted = true;
+// No authenticated session or profile.
+if (!session || !profile) {
+  router.replace('/');
+  return;
+}
 
-    async function loadWorkspace() {
-      try {
-        const {
-          data: { session },
-        } = await supabase.auth.getSession();
+// Route the authenticated user according to their verified role.
+if (profile.role === 'rider') {
+  router.replace('/dashboard/rider');
+  return;
+}
 
-        if (!session) {
-          router.replace('/');
-          return;
-        }
+if (profile.role === 'retailer') {
+  router.replace('/dashboard/retailer');
+  return;
+}
 
-        const { data: profile, error } = await supabase
-          .from('profiles')
-          .select('role')
-          .eq('id', session.user.id)
-          .single();
+// Unknown or unsupported role.
+router.replace('/');
 
-        if (error || !profile) {
-          console.error('Failed to retrieve workspace profile:', error);
-          await supabase.auth.signOut();
 
-          if (isMounted) {
-            router.replace('/');
-          }
+}, [loading, session, profile, router]);
 
-          return;
-        }
-
-        if (profile.role !== 'retailer' && profile.role !== 'rider') {
-          console.error('Unsupported workspace role:', profile.role);
-          await supabase.auth.signOut();
-
-          if (isMounted) {
-            router.replace('/');
-          }
-
-          return;
-        }
-
-        if (isMounted) {
-          setRole(profile.role);
-          setCheckingSession(false);
-        }
-      } catch (error) {
-        console.error('Workspace session check failed:', error);
-
-        if (isMounted) {
-          router.replace('/');
-        }
-      }
-    }
-
-    loadWorkspace();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [router]);
-
-  if (checkingSession) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 text-black font-semibold">
-        Verifying workspace session identity...
-      </div>
-    );
-  }
-
-  if (role === 'retailer') {
-    return <RetailerDashboard />;
-  }
-
-  if (role === 'rider') {
-    return <RiderDashboard />;
-  }
-
-  return null;
+return ( <div className="min-h-screen flex items-center justify-center bg-gray-50 text-black"> <p className="font-medium">
+{loading
+? 'Verifying workspace identity...'
+: 'Redirecting to your authorized workspace...'} </p> </div>
+);
 }
