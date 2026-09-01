@@ -25,7 +25,9 @@ export const createDeliveryRequest = async (req, res) => {
 
   try {
     // Generate tracking reference
-    const reference_number = `REF-${Math.floor(100000 + Math.random() * 900000)}`;
+    const reference_number = `REF-${Math.floor(
+      100000 + Math.random() * 900000
+    )}`;
 
     // Determine initial delivery state
     const initialStatus = rider_id ? 'Assigned' : 'Pending';
@@ -49,7 +51,7 @@ export const createDeliveryRequest = async (req, res) => {
       .single();
 
     if (error) {
-      console.error(' Delivery insert failed:', {
+      console.error('Delivery insert failed:', {
         message: error.message,
         code: error.code,
         details: error.details,
@@ -66,14 +68,19 @@ export const createDeliveryRequest = async (req, res) => {
     if (rider_id) {
       const { error: riderUpdateError } = await supabaseAdmin
         .from('profiles')
-        .update({ live_status: 'In Transit' })
+        .update({
+          live_status: 'In Transit'
+        })
         .eq('id', rider_id)
         .eq('role', 'rider');
 
       if (riderUpdateError) {
-        console.error(' Delivery created but rider status update failed:', riderUpdateError);
+        console.error(
+          'Delivery created but rider status update failed:',
+          riderUpdateError
+        );
 
-        // Do not fail the delivery creation because the secondary status update failed.
+        // Do not fail delivery creation because secondary update failed
         return res.status(201).json({
           message: 'Order created and dispatched',
           delivery: data,
@@ -82,13 +89,13 @@ export const createDeliveryRequest = async (req, res) => {
       }
     }
 
-    // Success
     return res.status(201).json({
       message: 'Order created and dispatched',
       delivery: data
     });
+
   } catch (error) {
-    console.error(' Unexpected delivery creation error:', error);
+    console.error('Unexpected delivery creation error:', error);
 
     return res.status(500).json({
       error: 'Failed to create delivery',
@@ -97,10 +104,13 @@ export const createDeliveryRequest = async (req, res) => {
   }
 };
 
+
 // GET /api/deliveries
 export const getDeliveries = async (req, res) => {
   try {
-    let query = supabaseAdmin.from('deliveries').select('*');
+    let query = supabaseAdmin
+      .from('deliveries')
+      .select('*');
 
     // Retailer: own deliveries
     if (req.user.role === 'retailer') {
@@ -113,10 +123,11 @@ export const getDeliveries = async (req, res) => {
     }
 
     // Fetch records
-    const { data: records, error } = await query.order('created_at', { ascending: false });
+    const { data: records, error } = await query
+      .order('created_at', { ascending: false });
 
     if (error) {
-      console.error(' Delivery retrieval failed:', {
+      console.error('Delivery retrieval failed:', {
         message: error.message,
         code: error.code,
         details: error.details,
@@ -129,10 +140,11 @@ export const getDeliveries = async (req, res) => {
     }
 
     // Privacy safeguard
-    const processedDeliveries = records.map(order => {
+    const processedDeliveries = records.map((order) => {
       if (
         req.user.role === 'rider' &&
-        (order.status === 'Delivered' || order.status === 'Cancelled')
+        (order.status === 'Delivered' ||
+          order.status === 'Cancelled')
       ) {
         return {
           ...order,
@@ -147,11 +159,152 @@ export const getDeliveries = async (req, res) => {
     return res.status(200).json({
       deliveries: processedDeliveries
     });
+
   } catch (error) {
-    console.error(' Unexpected delivery retrieval error:', error);
+    console.error(
+      'Unexpected delivery retrieval error:',
+      error
+    );
 
     return res.status(500).json({
       error: 'Failed to fetch deliveries record library'
+    });
+  }
+};
+
+
+// PATCH /api/deliveries/:id/status
+export const updateDeliveryStatus = async (req, res) => {
+  const { id } = req.params;
+  const { next_status } = req.body;
+
+  // Only valid rider progression states
+  const allowedStatuses = [
+    'Picked Up',
+    'Delivered'
+  ];
+
+  if (!next_status || !allowedStatuses.includes(next_status)) {
+    return res.status(400).json({
+      error: 'Invalid delivery status transition.'
+    });
+  }
+
+  try {
+    // Retrieve the delivery first
+    const { data: delivery, error: deliveryError } =
+      await supabaseAdmin
+        .from('deliveries')
+        .select('id, rider_id, status')
+        .eq('id', id)
+        .single();
+
+    if (deliveryError || !delivery) {
+      return res.status(404).json({
+        error: 'Delivery not found.'
+      });
+    }
+
+    // Security check:
+    // A rider may only update deliveries assigned to them
+    if (delivery.rider_id !== req.user.id) {
+      return res.status(403).json({
+        error: 'You are not assigned to this delivery.'
+      });
+    }
+
+    // Enforce sequential status transitions
+    if (
+      delivery.status === 'Assigned' &&
+      next_status !== 'Picked Up'
+    ) {
+      return res.status(400).json({
+        error: `Invalid status transition from ${delivery.status} to ${next_status}.`
+      });
+    }
+
+    if (
+      delivery.status === 'Picked Up' &&
+      next_status !== 'Delivered'
+    ) {
+      return res.status(400).json({
+        error: `Invalid status transition from ${delivery.status} to ${next_status}.`
+      });
+    }
+
+    // Prevent updates from already completed/cancelled states
+    if (
+      delivery.status !== 'Assigned' &&
+      delivery.status !== 'Picked Up'
+    ) {
+      return res.status(400).json({
+        error: `Delivery cannot transition from ${delivery.status}.`
+      });
+    }
+
+    // Update delivery status
+    const {
+      data: updatedDelivery,
+      error: updateError
+    } = await supabaseAdmin
+      .from('deliveries')
+      .update({
+        status: next_status
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      console.error(
+        'Delivery status update failed:',
+        updateError
+      );
+
+      return res.status(500).json({
+        error: 'Failed to update delivery status'
+      });
+    }
+
+    // Once delivered, rider becomes available again
+    if (next_status === 'Delivered') {
+      const { error: riderError } = await supabaseAdmin
+        .from('profiles')
+        .update({
+          live_status: 'Available'
+        })
+        .eq('id', req.user.id)
+        .eq('role', 'rider');
+
+      if (riderError) {
+        console.error(
+          'Rider status reset failed:',
+          riderError
+        );
+
+        // Delivery status was successfully updated,
+        // so don't turn the whole request into a failure.
+        return res.status(200).json({
+          message: 'Delivery marked as delivered',
+          delivery: updatedDelivery,
+          warning: 'Rider availability could not be reset'
+        });
+      }
+    }
+
+    return res.status(200).json({
+      message: 'Delivery status updated successfully',
+      delivery: updatedDelivery
+    });
+
+  } catch (error) {
+    console.error(
+      'Unexpected delivery status update error:',
+      error
+    );
+
+    return res.status(500).json({
+      error: 'Failed to update delivery status'
     });
   }
 };

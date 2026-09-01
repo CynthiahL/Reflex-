@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createDeliveryRequest, getDeliveries } from '../controllers/deliveryController.js';
+import { createDeliveryRequest, getDeliveries, updateDeliveryStatus } from '../controllers/deliveryController.js';
 import { checkAuth } from '../middleware/authMiddleware.js';
 import { grantAccessTo } from '../middleware/roleMiddleware.js';
 
@@ -86,6 +86,59 @@ router.get(
   '/',
   grantAccessTo(['retailer', 'dispatcher', 'rider']),
   getDeliveries
+);
+
+/**
+ * @openapi
+ * /api/deliveries/{id}/status:
+ *   patch:
+ *     summary: Update delivery status
+ *     description: Allows an authenticated rider to advance an assigned delivery from Assigned to Picked Up or from Picked Up to Delivered.
+ *     tags:
+ *       - Deliveries
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: UUID of the delivery
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - next_status
+ *             properties:
+ *               next_status:
+ *                 type: string
+ *                 enum:
+ *                   - Picked Up
+ *                   - Delivered
+ *                 example: Picked Up
+ *     responses:
+ *       200:
+ *         description: Delivery status successfully updated.
+ *       400:
+ *         description: Invalid delivery status transition.
+ *       401:
+ *         description: Missing or invalid authentication token.
+ *       403:
+ *         description: Rider is not assigned to this delivery.
+ *       404:
+ *         description: Delivery not found.
+ *       500:
+ *         description: Failed to update delivery status.
+ */
+router.patch(
+  '/:id/status',
+  grantAccessTo(['rider']),
+  updateDeliveryStatus
 );
 
 export default router;
