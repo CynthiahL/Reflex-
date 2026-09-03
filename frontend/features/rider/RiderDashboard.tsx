@@ -8,7 +8,7 @@ import React, {
 import { useRouter } from 'next/navigation';
 
 import { supabase } from '../../lib/supabaseClient';
-import { useAuth } from '../../components/AuthProvider';
+import { useAuth } from '../../app/components/AuthProvider';
 
 interface DeliveryTask {
   id: string;
